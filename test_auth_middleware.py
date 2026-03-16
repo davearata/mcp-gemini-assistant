@@ -12,7 +12,8 @@ os.environ.setdefault("GEMINI_API_KEY", "test-key")
 
 # We only need the middleware class; importing the full module would try to
 # initialise the Gemini client, so extract the class via importlib.
-import importlib.util, types as _types  # noqa: E401,E402
+import importlib.util
+import types as _types  # noqa: E402
 
 _spec = importlib.util.spec_from_file_location(
     "gemini_mcp",

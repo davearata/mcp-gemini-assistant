@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from urllib.parse import parse_qs, urlparse
 
+import anyio
+import uvicorn
 from google import genai
 from google.genai import types
 from mcp.server.fastmcp import FastMCP
@@ -638,8 +640,6 @@ if __name__ == "__main__":
     )
 
     if transport == "sse":
-        import uvicorn
-
         host = os.getenv("HOST", "0.0.0.0")
         port = int(os.getenv("PORT", "8000"))
         print(f"Transport: SSE  →  http://{host}:{port}/sse", file=sys.stderr)
@@ -676,7 +676,6 @@ if __name__ == "__main__":
             log_level="info",
         )
         server = uvicorn.Server(config)
-        import anyio
         anyio.run(server.serve)
     else:
         print("Transport: stdio (local)", file=sys.stderr)
