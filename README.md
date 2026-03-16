@@ -173,6 +173,54 @@ Features: Session management, file attachments, context persistence, follow-up q
 Ready to help with complex coding problems!
 ```
 
+## Remote / SSE Transport
+
+By default the server communicates over **stdio** (local process). For remote
+deployment — e.g. a shared team server or a Docker container — you can start
+it in **SSE (Server-Sent Events)** mode, which exposes an HTTP endpoint that
+any MCP client can connect to.
+
+### Starting the SSE server
+
+```bash
+# Using the dedicated startup script:
+GEMINI_API_KEY=<your-key> ./start_server_sse.sh
+
+# Or manually via environment variable:
+MCP_TRANSPORT=sse PORT=8000 ./venv/bin/python gemini_mcp.py
+```
+
+The server will print:
+
+```
+Gemini Coding Assistant MCP Server v3.1.0 running (Python)
+Transport: SSE  →  http://0.0.0.0:8000/sse
+Connect Claude Code with:
+  claude mcp add gemini-coding -s user --transport sse http://<your-server>:8000/sse
+```
+
+### Connecting Claude Code to a remote server
+
+```bash
+claude mcp add gemini-coding -s user --transport sse http://YOUR_SERVER:8000/sse
+```
+
+### Environment variables (SSE mode)
+
+| Variable          | Default      | Description                            |
+|-------------------|--------------|----------------------------------------|
+| `MCP_TRANSPORT`   | `stdio`      | Set to `sse` to enable HTTP transport  |
+| `HOST`            | `0.0.0.0`    | Network interface to bind              |
+| `PORT`            | `8000`       | TCP port to listen on                  |
+
+### Docker deployment
+
+A `Dockerfile` is available for containerised SSE deployment. See the
+[Dockerfile](#dockerfile) section below for build and run instructions.
+
+> **Note**: The existing `start_server.sh` (stdio) is completely unchanged.
+> All existing local installations continue to work without modification.
+
 ## Context Limits
 
 - Maximum combined input: ~50,000 characters per message
