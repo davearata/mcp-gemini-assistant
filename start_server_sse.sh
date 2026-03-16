@@ -10,9 +10,11 @@
 #   PORT            (optional) — TCP port,     default: 8000
 #   GEMINI_MODEL    (optional) — Gemini model, default: gemini-2.5-pro
 #   SYSTEM_PROMPT   (optional) — override the built-in system prompt
+#   MCP_AUTH_TOKEN  (optional) — shared secret to require authentication
 #
 # Connect Claude Code to the running server:
-#   claude mcp add gemini-coding -s user --transport sse http://<host>:<port>/sse
+#   Without auth: claude mcp add gemini-coding -s user --transport sse http://<host>:<port>/sse
+#   With auth:    claude mcp add gemini-coding -s user --transport sse http://<host>:<port>/sse?token=<your-token>
 
 set -euo pipefail
 

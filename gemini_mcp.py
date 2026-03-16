@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import asyncio
+import hmac
 import os
 import sys
 import time
@@ -9,6 +10,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from urllib.parse import parse_qs, urlparse
 
 from google import genai
 from google.genai import types
@@ -27,6 +29,58 @@ client = genai.Client(api_key=os.getenv('GEMINI_API_KEY'))
 # Configuration
 MODEL_NAME = os.getenv('GEMINI_MODEL', 'gemini-2.5-pro')
 SESSION_TTL = 3600  # 1 hour in seconds
+MCP_AUTH_TOKEN = os.getenv('MCP_AUTH_TOKEN', '')
+
+
+class TokenAuthMiddleware:
+    """ASGI middleware that guards SSE endpoints with a shared secret.
+
+    Accepts the token via:
+      1. ``Authorization: Bearer <token>`` header, **or**
+      2. ``?token=<token>`` query-string parameter.
+
+    When ``MCP_AUTH_TOKEN`` is empty the middleware is a no-op so that
+    existing local (stdio) setups keep working without changes.
+    """
+
+    def __init__(self, app, token: str):
+        self.app = app
+        self.token = token
+
+    async def __call__(self, scope, receive, send):
+        if not self.token or scope["type"] != "http":
+            return await self.app(scope, receive, send)
+
+        # Check Authorization header
+        headers = dict(scope.get("headers", []))
+        auth_header = headers.get(b"authorization", b"").decode()
+        bearer_token = ""
+        if auth_header.lower().startswith("bearer "):
+            bearer_token = auth_header[7:]
+
+        # Check query-string ?token=
+        qs = scope.get("query_string", b"").decode()
+        params = parse_qs(qs)
+        query_token = params.get("token", [""])[0]
+
+        supplied = bearer_token or query_token
+
+        if supplied and hmac.compare_digest(supplied, self.token):
+            return await self.app(scope, receive, send)
+
+        # Reject: send 401
+        await send({
+            "type": "http.response.start",
+            "status": 401,
+            "headers": [
+                [b"content-type", b"application/json"],
+                [b"www-authenticate", b"Bearer"],
+            ],
+        })
+        await send({
+            "type": "http.response.body",
+            "body": b'{"error":"unauthorized","message":"Valid token required"}',
+        })
 
 # Default system prompt for Gemini
 DEFAULT_SYSTEM_PROMPT = """You are an expert technical advisor helping Claude (another AI) solve complex programming problems through thoughtful analysis and genuine technical dialogue.
@@ -584,15 +638,46 @@ if __name__ == "__main__":
     )
 
     if transport == "sse":
+        import uvicorn
+
         host = os.getenv("HOST", "0.0.0.0")
         port = int(os.getenv("PORT", "8000"))
         print(f"Transport: SSE  →  http://{host}:{port}/sse", file=sys.stderr)
-        print(
-            "Connect Claude Code with:\n"
-            f"  claude mcp add gemini-coding -s user --transport sse http://<your-server>:{port}/sse",
-            file=sys.stderr,
+
+        if MCP_AUTH_TOKEN:
+            print("Authentication: ENABLED (MCP_AUTH_TOKEN is set)", file=sys.stderr)
+            print(
+                "Connect Claude Code with:\n"
+                f"  claude mcp add gemini-coding -s user --transport sse "
+                f"http://<your-server>:{port}/sse?token=<your-token>",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                "Authentication: DISABLED – set MCP_AUTH_TOKEN to require a secret",
+                file=sys.stderr,
+            )
+            print(
+                "Connect Claude Code with:\n"
+                f"  claude mcp add gemini-coding -s user --transport sse "
+                f"http://<your-server>:{port}/sse",
+                file=sys.stderr,
+            )
+
+        starlette_app = mcp.sse_app()
+
+        if MCP_AUTH_TOKEN:
+            starlette_app = TokenAuthMiddleware(starlette_app, MCP_AUTH_TOKEN)
+
+        config = uvicorn.Config(
+            starlette_app,
+            host=host,
+            port=port,
+            log_level="info",
         )
-        mcp.run(transport="sse", host=host, port=port)
+        server = uvicorn.Server(config)
+        import anyio
+        anyio.run(server.serve)
     else:
         print("Transport: stdio (local)", file=sys.stderr)
         print("Ready to help with complex coding problems!", file=sys.stderr)

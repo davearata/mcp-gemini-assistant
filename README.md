@@ -207,11 +207,50 @@ claude mcp add gemini-coding -s user --transport sse http://YOUR_SERVER:8000/sse
 
 ### Environment variables (SSE mode)
 
-| Variable          | Default      | Description                            |
-|-------------------|--------------|----------------------------------------|
-| `MCP_TRANSPORT`   | `stdio`      | Set to `sse` to enable HTTP transport  |
-| `HOST`            | `0.0.0.0`    | Network interface to bind              |
-| `PORT`            | `8000`       | TCP port to listen on                  |
+| Variable          | Default      | Description                                      |
+|-------------------|--------------|--------------------------------------------------|
+| `MCP_TRANSPORT`   | `stdio`      | Set to `sse` to enable HTTP transport            |
+| `HOST`            | `0.0.0.0`    | Network interface to bind                        |
+| `PORT`            | `8000`       | TCP port to listen on                            |
+| `MCP_AUTH_TOKEN`  | *(empty)*    | Shared secret — when set, authentication is required |
+
+### Securing the SSE endpoint
+
+When running the server over a network you should set `MCP_AUTH_TOKEN` to a
+strong, random secret.  With the token configured every request to the SSE
+endpoint must present the matching secret via **one** of two methods:
+
+| Method                        | Example                                                         |
+|-------------------------------|-----------------------------------------------------------------|
+| **Query parameter** (simple)  | `http://server:8000/sse?token=MY_SECRET`                        |
+| **Bearer header** (preferred) | `Authorization: Bearer MY_SECRET`                               |
+
+Requests that do not carry a valid token receive a **401 Unauthorized**
+response.  Token comparison uses a timing-safe algorithm to prevent
+side-channel attacks.
+
+**Quick start — generate a token and start the server:**
+
+```bash
+# Generate a random token
+export MCP_AUTH_TOKEN=$(openssl rand -hex 32)
+echo "Your auth token: $MCP_AUTH_TOKEN"
+
+# Start the server
+MCP_TRANSPORT=sse ./start_server_sse.sh
+```
+
+**Connecting Claude Code with a token:**
+
+```bash
+# Query-parameter approach (simplest — works with any MCP client URL field):
+claude mcp add gemini-coding -s user --transport sse \
+  "http://YOUR_SERVER:8000/sse?token=$MCP_AUTH_TOKEN"
+```
+
+> **Tip:** When `MCP_AUTH_TOKEN` is *not* set the server behaves exactly as
+> before — no authentication is required.  This keeps local (stdio) and
+> trusted-network setups working without changes.
 
 ### Docker deployment
 
@@ -245,6 +284,9 @@ A `Dockerfile` is available for containerised SSE deployment. See the
 ## Security
 
 - API key is never exposed
+- **SSE token authentication** — set `MCP_AUTH_TOKEN` to require a shared secret for remote connections
+- Token can be passed via `Authorization: Bearer` header or `?token=` query parameter
+- Timing-safe token comparison prevents side-channel leaks
 - Rate limiting prevents abuse
 - Sessions expire automatically
 - No persistent storage of code
