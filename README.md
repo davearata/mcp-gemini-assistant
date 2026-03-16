@@ -259,7 +259,7 @@ so that a single `docker run` gives you a publicly reachable **HTTPS** URL —
 no port-forwarding, DNS, or TLS certificates required.
 
 > **Yes, ngrok requires an authtoken.**  Sign up for free at
-> <https://dashboard.ngrok.com/get-started/your-authtoken> and copy the token.
+> <https://dashboard.ngrok.com> and copy your authtoken.
 > ngrok's free tier provides one tunnel at a time with a randomly generated URL.
 
 #### 1. Build the image

@@ -29,7 +29,12 @@ if [ -n "${NGROK_AUTHTOKEN:-}" ]; then
     # Wait for ngrok to establish the tunnel and expose its API
     for _ in $(seq 1 15); do
         NGROK_URL=$(curl -s http://localhost:4040/api/tunnels 2>/dev/null \
-            | sed -nE 's/.*"public_url":"(https:[^"]*).*/\1/p' | head -1) || true
+            | python -c "import sys,json
+try:
+    tunnels=json.load(sys.stdin).get('tunnels',[])
+    print(next((t['public_url'] for t in tunnels if t['public_url'].startswith('https')),''))
+except Exception:
+    print('')" 2>/dev/null) || true
         if [ -n "${NGROK_URL:-}" ]; then
             break
         fi
