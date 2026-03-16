@@ -574,8 +574,26 @@ async def end_session(session_id: str) -> str:
         return f"Session {session_id} not found or already expired"
 
 if __name__ == "__main__":
-    print("Gemini Coding Assistant MCP Server v3.0.0 running (Python)", file=sys.stderr)
-    print("Features: Session management, file attachments, context persistence, follow-up questions, request tracking", file=sys.stderr)
-    print("Ready to help with complex coding problems!", file=sys.stderr)
-    
-    mcp.run()
+    transport = os.getenv("MCP_TRANSPORT", "stdio").lower()
+
+    print("Gemini Coding Assistant MCP Server v3.1.0 running (Python)", file=sys.stderr)
+    print(
+        "Features: Session management, file attachments, context persistence, "
+        "follow-up questions, request tracking",
+        file=sys.stderr,
+    )
+
+    if transport == "sse":
+        host = os.getenv("HOST", "0.0.0.0")
+        port = int(os.getenv("PORT", "8000"))
+        print(f"Transport: SSE  →  http://{host}:{port}/sse", file=sys.stderr)
+        print(
+            "Connect Claude Code with:\n"
+            f"  claude mcp add gemini-coding -s user --transport sse http://<your-server>:{port}/sse",
+            file=sys.stderr,
+        )
+        mcp.run(transport="sse", host=host, port=port)
+    else:
+        print("Transport: stdio (local)", file=sys.stderr)
+        print("Ready to help with complex coding problems!", file=sys.stderr)
+        mcp.run()
