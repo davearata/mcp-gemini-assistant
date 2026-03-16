@@ -1,0 +1,11 @@
+.git
+.env
+*.log
+*.pyc
+__pycache__/
+venv/
+.DS_Store
+CLAUDE.md
+LICENSE
+test_*.py
+.pytest_cache/

@@ -252,10 +252,83 @@ claude mcp add gemini-coding -s user --transport sse \
 > before — no authentication is required.  This keeps local (stdio) and
 > trusted-network setups working without changes.
 
-### Docker deployment
+### Docker deployment with ngrok
 
-A `Dockerfile` is available for containerised SSE deployment. See the
-[Dockerfile](#dockerfile) section below for build and run instructions.
+The included `Dockerfile` bundles the MCP SSE server **and** [ngrok](https://ngrok.com)
+so that a single `docker run` gives you a publicly reachable **HTTPS** URL —
+no port-forwarding, DNS, or TLS certificates required.
+
+> **Yes, ngrok requires an authtoken.**  Sign up for free at
+> <https://dashboard.ngrok.com/get-started/your-authtoken> and copy the token.
+> ngrok's free tier provides one tunnel at a time with a randomly generated URL.
+
+#### 1. Build the image
+
+```bash
+docker build -t gemini-mcp-sse .
+```
+
+#### 2. Run the container
+
+```bash
+docker run --rm -it \
+  -e GEMINI_API_KEY="<your-gemini-key>" \
+  -e MCP_AUTH_TOKEN="$(openssl rand -hex 32)" \
+  -e NGROK_AUTHTOKEN="<your-ngrok-authtoken>" \
+  -p 8000:8000 \
+  gemini-mcp-sse
+```
+
+On startup the container will:
+
+1. Start the MCP SSE server on port 8000 (with `MCP_AUTH_TOKEN` authentication).
+2. Launch an ngrok tunnel that creates a public **HTTPS** URL pointing at port 8000.
+3. Print the public URL and connection instructions to the console:
+
+```
+============================================================
+  ngrok tunnel active
+  Public URL: https://abc123.ngrok-free.app
+
+  Connect (with auth):
+    https://abc123.ngrok-free.app/sse?token=<your-MCP_AUTH_TOKEN>
+============================================================
+```
+
+#### 3. Connect Claude Code
+
+Use the HTTPS URL printed by the container:
+
+```bash
+claude mcp add gemini-coding -s user --transport sse \
+  "https://abc123.ngrok-free.app/sse?token=YOUR_MCP_AUTH_TOKEN"
+```
+
+Or paste it into the **Remote MCP server URL** field in the Claude web app's
+"Add custom connector" dialog.
+
+#### Environment variables (Docker)
+
+| Variable          | Required | Description                                                 |
+|-------------------|----------|-------------------------------------------------------------|
+| `GEMINI_API_KEY`  | **yes**  | Your Google Gemini API key                                  |
+| `NGROK_AUTHTOKEN` | **yes**  | ngrok authtoken — get one at https://dashboard.ngrok.com    |
+| `MCP_AUTH_TOKEN`  | recommended | Shared secret for SSE authentication                     |
+| `GEMINI_MODEL`    | no       | Gemini model (default: `gemini-2.5-pro`)                    |
+| `PORT`            | no       | Internal port (default: `8000`)                             |
+
+#### Running without ngrok
+
+If you omit `NGROK_AUTHTOKEN` the container starts the MCP SSE server without
+a tunnel.  You can then expose port 8000 yourself (reverse proxy, cloud
+load-balancer, etc.):
+
+```bash
+docker run --rm -it \
+  -e GEMINI_API_KEY="<your-gemini-key>" \
+  -p 8000:8000 \
+  gemini-mcp-sse
+```
 
 > **Note**: The existing `start_server.sh` (stdio) is completely unchanged.
 > All existing local installations continue to work without modification.
@@ -287,6 +360,7 @@ A `Dockerfile` is available for containerised SSE deployment. See the
 - **SSE token authentication** — set `MCP_AUTH_TOKEN` to require a shared secret for remote connections
 - Token can be passed via `Authorization: Bearer` header or `?token=` query parameter
 - Timing-safe token comparison prevents side-channel leaks
+- **HTTPS via ngrok** — the Docker image tunnels traffic through ngrok, providing TLS encryption without manual certificate setup
 - Rate limiting prevents abuse
 - Sessions expire automatically
 - No persistent storage of code
