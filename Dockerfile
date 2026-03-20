@@ -1,30 +1,31 @@
-FROM python:3.12-slim
+FROM ngrok/ngrok:debian
 
-SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+SHELL ["/usr/bin/bash", "-o", "pipefail", "-c"]
 
-# Install curl (needed to query ngrok API at runtime) and ngrok via the
-# official apt repository.
+# Switch to root to install system packages.
+USER root
+
+# The ngrok/ngrok:debian image ships ngrok pre-installed on Debian bookworm.
+# Add Python 3, pip, and curl (curl is needed to query the ngrok API at
+# runtime).
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl gnupg \
-    && curl -sSL https://ngrok-agent.s3.amazonaws.com/ngrok.asc \
-       | tee /etc/apt/trusted.gpg.d/ngrok.asc > /dev/null \
-    && echo "deb https://ngrok-agent.s3.amazonaws.com trixie main" \
-       > /etc/apt/sources.list.d/ngrok.list \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends ngrok \
-    && apt-get purge -y --auto-remove gnupg \
+    && apt-get install -y --no-install-recommends \
+       python3 python3-pip python3-venv curl \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
 # Install Python dependencies first (layer caching)
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --break-system-packages -r requirements.txt
 
 # Copy application code
 COPY gemini_mcp.py .
 COPY docker-entrypoint.sh .
 RUN chmod +x docker-entrypoint.sh
+
+# Drop back to the ngrok user for runtime.
+USER ngrok
 
 # ── Required ────────────────────────────────────────────────────────────────
 # GEMINI_API_KEY   — your Google Gemini API key

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Entrypoint for the Docker image.
 # Starts the MCP SSE server and, when NGROK_AUTHTOKEN is set, opens an ngrok
 # tunnel so the server is reachable over the public internet via HTTPS.
@@ -14,7 +14,7 @@ fi
 
 # ── Start the MCP SSE server in the background ─────────────────────────────
 echo "Starting MCP SSE server on port ${PORT}..." >&2
-python gemini_mcp.py &
+python3 gemini_mcp.py &
 MCP_PID=$!
 
 # Give the server a moment to bind
@@ -29,7 +29,7 @@ if [ -n "${NGROK_AUTHTOKEN:-}" ]; then
     # Wait for ngrok to establish the tunnel and expose its API
     for _ in $(seq 1 15); do
         NGROK_URL=$(curl -s http://localhost:4040/api/tunnels 2>/dev/null \
-            | python -c "import sys,json
+            | python3 -c "import sys,json
 try:
     tunnels=json.load(sys.stdin).get('tunnels',[])
     print(next((t['public_url'] for t in tunnels if t['public_url'].startswith('https')),''))
