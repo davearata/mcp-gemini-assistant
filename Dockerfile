@@ -1,35 +1,29 @@
-FROM ngrok/ngrok:debian
-
-SHELL ["/usr/bin/bash", "-o", "pipefail", "-c"]
-
-# Switch to root to install system packages.
-USER root
-
-# The ngrok/ngrok:debian image ships ngrok pre-installed on Debian bookworm.
-# Add Python 3, pip, and curl (curl is needed to query the ngrok API at
-# runtime).
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-       python3 python3-pip python3-venv curl \
-    && rm -rf /var/lib/apt/lists/*
+FROM python:3.12-slim
 
 WORKDIR /app
 
 # Install Python dependencies first (layer caching)
 COPY requirements.txt .
-RUN pip install --no-cache-dir --break-system-packages -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+
+# The /etc/ssl/certs directory in this base image has restrictive permissions
+# (mode 700) that prevent non-root users from reading CA certificates.
+# Copy the CA bundle to a world-readable location.  The entrypoint sets
+# SSL_CERT_FILE at runtime to point here (the base image bakes in the old
+# path at a layer that overrides Dockerfile ENV).
+RUN cp /etc/ssl/certs/ca-certificates.crt /usr/local/share/ca-certificates.crt
 
 # Copy application code
 COPY gemini_mcp.py .
 COPY docker-entrypoint.sh .
 RUN chmod +x docker-entrypoint.sh
 
-# Drop back to the ngrok user for runtime.
-USER ngrok
+# Run as a non-root user
+RUN useradd --create-home appuser
+USER appuser
 
 # ── Required ────────────────────────────────────────────────────────────────
 # GEMINI_API_KEY   — your Google Gemini API key
-# NGROK_AUTHTOKEN  — your ngrok authtoken (https://dashboard.ngrok.com)
 #
 # ── Optional ────────────────────────────────────────────────────────────────
 # MCP_AUTH_TOKEN   — shared secret for SSE authentication
