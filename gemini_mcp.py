@@ -18,6 +18,7 @@ from google import genai
 from google.genai import types
 from mcp.server.fastmcp import FastMCP
 from mcp.types import TextContent
+from starlette.middleware.cors import CORSMiddleware
 import json
 
 # Configure environment
@@ -685,6 +686,16 @@ if __name__ == "__main__":
 
         if MCP_AUTH_TOKEN:
             starlette_app = TokenAuthMiddleware(starlette_app, MCP_AUTH_TOKEN)
+
+        # CORS: allow MCP Inspector (and other browser-based clients) to
+        # connect in "Direct" mode.  Must be the outermost middleware so
+        # OPTIONS preflight requests are answered before auth runs.
+        starlette_app = CORSMiddleware(
+            starlette_app,
+            allow_origins=["*"],
+            allow_methods=["GET", "POST"],
+            allow_headers=["*"],
+        )
 
         config = uvicorn.Config(
             starlette_app,

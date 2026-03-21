@@ -250,3 +250,113 @@ class TestTokenAuthMiddleware:
         body = json.loads(body_msg["body"])
         assert "Authorization: Bearer" in body["message"]
         assert "?token=" in body["message"]
+
+
+# ---------------------------------------------------------------------------
+# CORS middleware integration tests
+# ---------------------------------------------------------------------------
+
+class TestCORSMiddleware:
+    """Verify that CORSMiddleware wraps the app correctly."""
+
+    @pytest.mark.asyncio
+    async def test_cors_import_available(self):
+        """Starlette CORSMiddleware is importable (dependency present)."""
+        from starlette.middleware.cors import CORSMiddleware
+        assert CORSMiddleware is not None
+
+    @pytest.mark.asyncio
+    async def test_cors_wraps_auth_middleware(self):
+        """CORS middleware wraps auth, so OPTIONS preflight is answered
+        before auth runs (no 401 on preflight)."""
+        from starlette.middleware.cors import CORSMiddleware
+
+        inner = AsyncMock()
+        auth = TokenAuthMiddleware(inner, "my-secret")
+        cors = CORSMiddleware(
+            auth,
+            allow_origins=["*"],
+            allow_methods=["GET", "POST"],
+            allow_headers=["*"],
+        )
+
+        # Simulate an OPTIONS preflight request to /sse
+        scope = {
+            "type": "http",
+            "method": "OPTIONS",
+            "path": "/sse",
+            "headers": [
+                [b"origin", b"http://localhost:6274"],
+                [b"access-control-request-method", b"GET"],
+            ],
+            "query_string": b"",
+            "root_path": "",
+        }
+
+        responses = []
+
+        async def receive():
+            return {"type": "http.request", "body": b""}
+
+        async def send(message):
+            responses.append(message)
+
+        await cors(scope, receive, send)
+
+        # Should get a 200 (not 401) with CORS headers
+        start = next(r for r in responses if r.get("type") == "http.response.start")
+        assert start["status"] == 200
+        headers = dict(start["headers"])
+        assert b"access-control-allow-origin" in headers
+
+    @pytest.mark.asyncio
+    async def test_cors_adds_headers_to_authenticated_response(self):
+        """Authenticated requests get CORS headers added by the outer layer."""
+        from starlette.middleware.cors import CORSMiddleware
+
+        # Create a simple inner app that returns 200
+        async def ok_app(scope, receive, send):
+            await send({
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [[b"content-type", b"text/plain"]],
+            })
+            await send({
+                "type": "http.response.body",
+                "body": b"ok",
+            })
+
+        auth = TokenAuthMiddleware(ok_app, "my-secret")
+        cors = CORSMiddleware(
+            auth,
+            allow_origins=["*"],
+            allow_methods=["GET", "POST"],
+            allow_headers=["*"],
+        )
+
+        scope = {
+            "type": "http",
+            "method": "GET",
+            "path": "/sse",
+            "headers": [
+                [b"origin", b"http://localhost:6274"],
+                [b"authorization", b"Bearer my-secret"],
+            ],
+            "query_string": b"",
+            "root_path": "",
+        }
+
+        responses = []
+
+        async def receive():
+            return {"type": "http.request", "body": b""}
+
+        async def send(message):
+            responses.append(message)
+
+        await cors(scope, receive, send)
+
+        start = next(r for r in responses if r.get("type") == "http.response.start")
+        assert start["status"] == 200
+        headers = dict(start["headers"])
+        assert headers.get(b"access-control-allow-origin") == b"*"
