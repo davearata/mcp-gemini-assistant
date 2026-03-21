@@ -53,6 +53,13 @@ class TokenAuthMiddleware:
         if not self.token or scope["type"] != "http":
             return await self.app(scope, receive, send)
 
+        # Only guard the SSE endpoint.  The /messages endpoint is
+        # session-scoped (the session-id is communicated over the
+        # authenticated SSE stream) so it doesn't need a separate
+        # token check.
+        if scope.get("path", "").rstrip("/") != "/sse":
+            return await self.app(scope, receive, send)
+
         # Check Authorization header
         headers = dict(scope.get("headers", []))
         auth_header = headers.get(b"authorization", b"").decode()

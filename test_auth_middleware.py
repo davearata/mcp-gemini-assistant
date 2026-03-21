@@ -40,7 +40,7 @@ TokenAuthMiddleware = _mod.TokenAuthMiddleware
 # Helpers
 # ---------------------------------------------------------------------------
 
-async def _make_request(middleware, headers=None, query_string=b""):
+async def _make_request(middleware, headers=None, query_string=b"", path="/sse"):
     """Simulate an ASGI HTTP request through the middleware."""
     raw_headers = []
     for k, v in (headers or {}).items():
@@ -48,6 +48,7 @@ async def _make_request(middleware, headers=None, query_string=b""):
 
     scope = {
         "type": "http",
+        "path": path,
         "headers": raw_headers,
         "query_string": query_string,
     }
@@ -76,7 +77,7 @@ class TestTokenAuthMiddleware:
         """When the server token is empty, all requests pass through."""
         inner = AsyncMock()
         mw = TokenAuthMiddleware(inner, "")
-        scope = {"type": "http", "headers": [], "query_string": b""}
+        scope = {"type": "http", "path": "/sse", "headers": [], "query_string": b""}
         await mw(scope, None, None)
         inner.assert_awaited_once()
 
@@ -96,6 +97,7 @@ class TestTokenAuthMiddleware:
         mw = TokenAuthMiddleware(inner, "my-secret")
         scope = {
             "type": "http",
+            "path": "/sse",
             "headers": [[b"authorization", b"Bearer my-secret"]],
             "query_string": b"",
         }
@@ -115,6 +117,7 @@ class TestTokenAuthMiddleware:
         mw = TokenAuthMiddleware(inner, "my-secret")
         scope = {
             "type": "http",
+            "path": "/sse",
             "headers": [],
             "query_string": b"token=my-secret",
         }
@@ -140,6 +143,7 @@ class TestTokenAuthMiddleware:
         mw = TokenAuthMiddleware(inner, "header-token")
         scope = {
             "type": "http",
+            "path": "/sse",
             "headers": [[b"authorization", b"Bearer header-token"]],
             "query_string": b"token=wrong",
         }
@@ -162,3 +166,26 @@ class TestTokenAuthMiddleware:
         start = next(r for r in responses if r.get("type") == "http.response.start")
         header_names = [h[0] for h in start["headers"]]
         assert b"www-authenticate" in header_names
+
+    @pytest.mark.asyncio
+    async def test_messages_endpoint_passes_without_token(self):
+        """POST /messages passes through even without a token.
+
+        The /messages endpoint is session-scoped (the session-id is only
+        communicated over the authenticated SSE stream), so it does not
+        require a separate token check.
+        """
+        inner, responses = await _make_request(
+            "my-secret", path="/messages"
+        )
+        inner.assert_awaited_once()
+        assert not any(r.get("status") == 401 for r in responses)
+
+    @pytest.mark.asyncio
+    async def test_non_sse_path_passes_without_token(self):
+        """Requests to paths other than /sse are not auth-gated."""
+        inner, responses = await _make_request(
+            "my-secret", path="/health"
+        )
+        inner.assert_awaited_once()
+        assert not any(r.get("status") == 401 for r in responses)
