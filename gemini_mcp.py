@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
 import anyio
 import uvicorn
@@ -75,6 +75,11 @@ class TokenAuthMiddleware:
         supplied = bearer_token or query_token
 
         if supplied and hmac.compare_digest(supplied, self.token):
+            # Strip the token from the query string before forwarding to
+            # the inner app so it doesn't appear in access logs.
+            if query_token:
+                remaining = {k: v for k, v in params.items() if k != "token"}
+                scope = dict(scope, query_string=urlencode(remaining, doseq=True).encode())
             return await self.app(scope, receive, send)
 
         # Reject: send 401
@@ -88,7 +93,12 @@ class TokenAuthMiddleware:
         })
         await send({
             "type": "http.response.body",
-            "body": b'{"error":"unauthorized","message":"Valid token required"}',
+            "body": json.dumps({
+                "error": "unauthorized",
+                "message": "Valid token required. Supply via "
+                           "Authorization: Bearer <token> header "
+                           "or ?token=<token> query parameter.",
+            }).encode(),
         })
 
 # Default system prompt for Gemini

@@ -189,3 +189,64 @@ class TestTokenAuthMiddleware:
         )
         inner.assert_awaited_once()
         assert not any(r.get("status") == 401 for r in responses)
+
+    @pytest.mark.asyncio
+    async def test_query_token_stripped_from_scope(self):
+        """Token is stripped from query_string before forwarding to inner app."""
+        inner = AsyncMock()
+        mw = TokenAuthMiddleware(inner, "my-secret")
+        scope = {
+            "type": "http",
+            "path": "/sse",
+            "headers": [],
+            "query_string": b"token=my-secret",
+        }
+        await mw(scope, None, None)
+        inner.assert_awaited_once()
+        # The inner app should receive an empty query string
+        forwarded_scope = inner.call_args[0][0]
+        assert b"token" not in forwarded_scope["query_string"]
+
+    @pytest.mark.asyncio
+    async def test_query_token_stripped_preserves_other_params(self):
+        """Other query params are preserved when token is stripped."""
+        inner = AsyncMock()
+        mw = TokenAuthMiddleware(inner, "my-secret")
+        scope = {
+            "type": "http",
+            "path": "/sse",
+            "headers": [],
+            "query_string": b"token=my-secret&foo=bar",
+        }
+        await mw(scope, None, None)
+        inner.assert_awaited_once()
+        forwarded_scope = inner.call_args[0][0]
+        qs = forwarded_scope["query_string"].decode()
+        assert "foo=bar" in qs
+        assert "token" not in qs
+
+    @pytest.mark.asyncio
+    async def test_bearer_auth_preserves_query_string(self):
+        """When auth is via bearer header, query string is untouched."""
+        inner = AsyncMock()
+        mw = TokenAuthMiddleware(inner, "my-secret")
+        scope = {
+            "type": "http",
+            "path": "/sse",
+            "headers": [[b"authorization", b"Bearer my-secret"]],
+            "query_string": b"foo=bar",
+        }
+        await mw(scope, None, None)
+        inner.assert_awaited_once()
+        forwarded_scope = inner.call_args[0][0]
+        assert forwarded_scope["query_string"] == b"foo=bar"
+
+    @pytest.mark.asyncio
+    async def test_401_body_includes_instructions(self):
+        """401 body includes instructions on how to authenticate."""
+        _, responses = await _make_request("secret")
+        import json
+        body_msg = next(r for r in responses if r.get("type") == "http.response.body")
+        body = json.loads(body_msg["body"])
+        assert "Authorization: Bearer" in body["message"]
+        assert "?token=" in body["message"]
