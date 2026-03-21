@@ -683,7 +683,10 @@ if __name__ == "__main__":
             log_level="info",
         )
         server = uvicorn.Server(config)
-        anyio.run(server.serve)
+        try:
+            anyio.run(server.serve)
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            print("\nServer stopped.", file=sys.stderr)
     else:
         print("Transport: stdio (local)", file=sys.stderr)
         print("Ready to help with complex coding problems!", file=sys.stderr)
