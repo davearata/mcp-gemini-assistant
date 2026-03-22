@@ -6,11 +6,16 @@
 #
 # BASE_URL defaults to http://localhost:8000
 #
+# Environment variables:
+#   MCP_AUTH_TOKEN  — if set, the script tests both authenticated and
+#                     unauthenticated access to the SSE endpoint.
+#
 # The script exercises the MCP SSE protocol:
-#   1. Connects to GET /sse and reads the "endpoint" event
-#   2. Sends an "initialize" JSON-RPC request via POST
-#   3. Sends a "notifications/initialized" notification
-#   4. Sends a "tools/list" request and verifies known tools
+#   1. (If auth enabled) Verifies unauthenticated requests are rejected
+#   2. Connects to GET /sse and reads the "endpoint" event
+#   3. Sends an "initialize" JSON-RPC request via POST
+#   4. Sends a "notifications/initialized" notification
+#   5. Sends a "tools/list" request and verifies known tools
 #
 # Exit codes:
 #   0  — all checks passed
@@ -19,6 +24,7 @@
 set -euo pipefail
 
 BASE_URL="${1:-http://localhost:8000}"
+AUTH_TOKEN="${MCP_AUTH_TOKEN:-}"
 PASS=0
 FAIL=0
 TMPDIR_TEST="$(mktemp -d)"
@@ -44,12 +50,42 @@ check() {
     fi
 }
 
+# ---------- Auth tests (only when MCP_AUTH_TOKEN is set) ---------------------
+
+if [ -n "$AUTH_TOKEN" ]; then
+    bold "0. Authentication checks (MCP_AUTH_TOKEN is set) …"
+
+    # 0a. No token → 401
+    NO_AUTH_STATUS="$(curl -s -o /dev/null -w '%{http_code}' "$BASE_URL/sse")"
+    check "GET /sse without token returns 401 (got $NO_AUTH_STATUS)" \
+        '[ "$NO_AUTH_STATUS" = "401" ]'
+
+    # 0b. Wrong token → 401
+    BAD_AUTH_STATUS="$(curl -s -o /dev/null -w '%{http_code}' "$BASE_URL/sse?token=wrong-token")"
+    check "GET /sse with wrong query-param token returns 401 (got $BAD_AUTH_STATUS)" \
+        '[ "$BAD_AUTH_STATUS" = "401" ]'
+
+    # 0c. Wrong bearer header → 401
+    BAD_BEARER_STATUS="$(curl -s -o /dev/null -w '%{http_code}' \
+        -H "Authorization: Bearer wrong-token" "$BASE_URL/sse")"
+    check "GET /sse with wrong Bearer token returns 401 (got $BAD_BEARER_STATUS)" \
+        '[ "$BAD_BEARER_STATUS" = "401" ]'
+
+    echo ""
+fi
+
 # ---------- 1. SSE endpoint --------------------------------------------------
 
 bold "1. Connecting to SSE endpoint ($BASE_URL/sse) …"
 
-# Start a background curl that keeps the SSE connection open and appends to a file.
-curl -sN "$BASE_URL/sse" > "$SSE_FILE" 2>/dev/null &
+# Build curl args — include auth if needed.
+SSE_CURL_ARGS=( -sN )
+if [ -n "$AUTH_TOKEN" ]; then
+    SSE_CURL_ARGS+=( -H "Authorization: Bearer $AUTH_TOKEN" )
+    echo "  (using Bearer token for authentication)"
+fi
+
+curl "${SSE_CURL_ARGS[@]}" "$BASE_URL/sse" > "$SSE_FILE" 2>/dev/null &
 SSE_PID=$!
 
 # Wait for the SSE stream to deliver the initial "endpoint" event.
@@ -64,7 +100,7 @@ done
 
 if [ ! -s "$SSE_FILE" ]; then
     fail "SSE endpoint returned no data (is the server running at $BASE_URL?)"
-    bold "Result: 0 passed, 1 failed"
+    bold "Result: $PASS passed, $((FAIL)) failed"
     exit 1
 fi
 
@@ -159,6 +195,32 @@ check "tools/list response includes list_sessions" \
 
 check "tools/list response includes end_session" \
     "echo \"\$TOOLS_DATA\" | grep -q 'end_session'"
+
+# ---------- Auth with query param (only when MCP_AUTH_TOKEN is set) ----------
+
+if [ -n "$AUTH_TOKEN" ]; then
+    echo ""
+    bold "5. Testing SSE with query-param token …"
+
+    QP_FILE="$TMPDIR_TEST/sse_qp_output"
+
+    curl -sN "$BASE_URL/sse?token=$AUTH_TOKEN" > "$QP_FILE" 2>/dev/null &
+    QP_PID=$!
+
+    RETRIES=0
+    while [ $RETRIES -lt 10 ]; do
+        if grep -q '^event: endpoint' "$QP_FILE" 2>/dev/null; then
+            break
+        fi
+        sleep 1
+        RETRIES=$((RETRIES + 1))
+    done
+
+    check "GET /sse?token=… returns SSE stream with endpoint event" \
+        "grep -q '^event: endpoint' '$QP_FILE'"
+
+    kill "$QP_PID" 2>/dev/null || true
+fi
 
 # ---------- Summary ----------------------------------------------------------
 

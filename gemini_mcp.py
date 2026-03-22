@@ -9,12 +9,67 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from urllib.parse import parse_qs, urlencode
 
 from google import genai
 from google.genai import types
 from mcp.server.fastmcp import FastMCP
 from mcp.types import TextContent
 import json
+
+
+# ---------------------------------------------------------------------------
+# Token-based authentication middleware (optional)
+# ---------------------------------------------------------------------------
+# Set MCP_AUTH_TOKEN to require a token for the GET /sse endpoint.
+# The token can be provided as:
+#   1. Query parameter:  /sse?token=<value>
+#   2. HTTP header:      Authorization: Bearer <value>
+#
+# POST /messages is *not* guarded because the session-id (communicated over
+# the already-authenticated SSE stream) provides implicit authentication.
+# ---------------------------------------------------------------------------
+
+class TokenAuthMiddleware:
+    """ASGI middleware that guards GET /sse with a bearer / query-param token."""
+
+    def __init__(self, app, token: str):
+        self.app = app
+        self.token = token
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and scope["method"] == "GET" and scope["path"] == "/sse":
+            # Try Authorization header first
+            headers = dict(scope.get("headers", []))
+            auth_header = headers.get(b"authorization", b"").decode()
+            token_from_header = ""
+            if auth_header.lower().startswith("bearer "):
+                token_from_header = auth_header[7:]
+
+            # Try query-string ?token=<value>
+            qs = scope.get("query_string", b"").decode()
+            params = parse_qs(qs)
+            token_from_qs = params.get("token", [""])[0]
+
+            if token_from_header == self.token or token_from_qs == self.token:
+                # Strip the token param from the query string before forwarding
+                if token_from_qs:
+                    remaining = {k: v for k, v in params.items() if k != "token"}
+                    scope = dict(scope, query_string=urlencode(remaining, doseq=True).encode())
+                await self.app(scope, receive, send)
+            else:
+                # 401 Unauthorized
+                await send({
+                    "type": "http.response.start",
+                    "status": 401,
+                    "headers": [[b"content-type", b"application/json"]],
+                })
+                await send({
+                    "type": "http.response.body",
+                    "body": b'{"error":"Unauthorized: valid token required"}',
+                })
+        else:
+            await self.app(scope, receive, send)
 
 # Configure environment
 if not os.getenv('GEMINI_API_KEY'):
@@ -587,13 +642,30 @@ if __name__ == "__main__":
     )
 
     if transport == "sse":
+        import uvicorn
+
+        auth_token = os.getenv("MCP_AUTH_TOKEN", "")
+
         print(f"Transport: SSE  →  http://{_host}:{_port}/sse", file=sys.stderr)
+        if auth_token:
+            print("Auth: token required (MCP_AUTH_TOKEN is set)", file=sys.stderr)
+        else:
+            print("Auth: disabled (MCP_AUTH_TOKEN not set)", file=sys.stderr)
         print(
             "Connect Claude Code with:\n"
             f"  claude mcp add gemini-coding -s user --transport sse http://<your-server>:{_port}/sse",
             file=sys.stderr,
         )
-        mcp.run(transport="sse")
+
+        app = mcp.sse_app()
+
+        if auth_token:
+            app = TokenAuthMiddleware(app, auth_token)
+
+        try:
+            uvicorn.run(app, host=_host, port=_port, log_level="info")
+        except KeyboardInterrupt:
+            pass
     else:
         print("Transport: stdio (local)", file=sys.stderr)
         print("Ready to help with complex coding problems!", file=sys.stderr)
