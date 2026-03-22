@@ -33,6 +33,7 @@ client = genai.Client(api_key=os.getenv('GEMINI_API_KEY'))
 MODEL_NAME = os.getenv('GEMINI_MODEL', 'gemini-2.5-pro')
 SESSION_TTL = 3600  # 1 hour in seconds
 MCP_AUTH_TOKEN = os.getenv('MCP_AUTH_TOKEN', '')
+SERVER_VERSION = "3.1.0"
 
 
 class TokenAuthMiddleware:
@@ -650,7 +651,7 @@ async def end_session(session_id: str) -> str:
 if __name__ == "__main__":
     transport = os.getenv("MCP_TRANSPORT", "stdio").lower()
 
-    print("Gemini Coding Assistant MCP Server v3.1.0 running (Python)", file=sys.stderr)
+    print(f"Gemini Coding Assistant MCP Server v{SERVER_VERSION} running (Python)", file=sys.stderr)
     print(
         "Features: Session management, file attachments, context persistence, "
         "follow-up questions, request tracking",
@@ -699,7 +700,7 @@ if __name__ == "__main__":
                     "body": json.dumps({
                         "status": "ok",
                         "server": "gemini-coding-assistant",
-                        "version": "3.1.0",
+                        "version": SERVER_VERSION,
                         "auth_enabled": bool(MCP_AUTH_TOKEN),
                     }).encode(),
                 })
