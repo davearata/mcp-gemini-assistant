@@ -684,6 +684,30 @@ if __name__ == "__main__":
 
         starlette_app = mcp.sse_app()
 
+        # Wrap with a /health endpoint for quick liveness checks.
+        _inner = starlette_app
+
+        async def _health_wrapper(scope, receive, send):
+            if scope["type"] == "http" and scope.get("path", "").rstrip("/") == "/health":
+                await send({
+                    "type": "http.response.start",
+                    "status": 200,
+                    "headers": [[b"content-type", b"application/json"]],
+                })
+                await send({
+                    "type": "http.response.body",
+                    "body": json.dumps({
+                        "status": "ok",
+                        "server": "gemini-coding-assistant",
+                        "version": "3.1.0",
+                        "auth_enabled": bool(MCP_AUTH_TOKEN),
+                    }).encode(),
+                })
+                return
+            return await _inner(scope, receive, send)
+
+        starlette_app = _health_wrapper
+
         if MCP_AUTH_TOKEN:
             starlette_app = TokenAuthMiddleware(starlette_app, MCP_AUTH_TOKEN)
 

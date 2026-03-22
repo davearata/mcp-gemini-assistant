@@ -173,6 +173,45 @@ Features: Session management, file attachments, context persistence, follow-up q
 Ready to help with complex coding problems!
 ```
 
+### Testing with curl (SSE mode)
+
+A test script is provided that exercises every endpoint with curl:
+
+```bash
+# Start the server in one terminal:
+MCP_TRANSPORT=sse MCP_AUTH_TOKEN=test-secret PORT=8000 python gemini_mcp.py
+
+# In another terminal, run the test script:
+./test_server_curl.sh http://localhost:8000 test-secret
+```
+
+The script tests: health check, auth gating, CORS preflight, SSE streaming,
+and the full MCP JSON-RPC flow (initialize → tools/list).
+
+You can also test individual endpoints manually:
+
+```bash
+# Health check (no auth required)
+curl http://localhost:8000/health
+
+# SSE connect with token (streams events)
+curl -N "http://localhost:8000/sse?token=YOUR_TOKEN"
+
+# SSE connect with Bearer header
+curl -N -H "Authorization: Bearer YOUR_TOKEN" http://localhost:8000/sse
+
+# Auth rejection (should return 401)
+curl http://localhost:8000/sse
+
+# CORS preflight
+curl -X OPTIONS -H "Origin: http://localhost:6274" \
+     -H "Access-Control-Request-Method: GET" \
+     http://localhost:8000/sse
+```
+
+> **Tip:** When parsing the SSE stream output in shell scripts, strip `\r`
+> from data fields: `grep "^data:" output.txt | sed 's/^data: //' | tr -d '\r'`
+
 ## Remote / SSE Transport
 
 By default the server communicates over **stdio** (local process). For remote
