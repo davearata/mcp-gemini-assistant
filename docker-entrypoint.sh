@@ -1,4 +1,6 @@
 #!/bin/sh
+set -e
+
 # Ensure the non-root user can read CA certificates.
 # python:3.12-slim ships /etc/ssl/certs with mode 700 (root-only).
 # We copied the bundle to a world-readable path at build time;
