@@ -336,8 +336,11 @@ class GeminiMCPServer:
                 if match not in session.search_queries:
                     session.search_queries.append(match.strip())
 
-# Create server instance
-mcp = FastMCP("gemini-coding-assistant")
+# Create server instance — pick up HOST / PORT early so the SSE transport
+# binds to the right address (FastMCP reads them from its settings object).
+_host = os.getenv("HOST", "0.0.0.0")
+_port = int(os.getenv("PORT", "8000"))
+mcp = FastMCP("gemini-coding-assistant", host=_host, port=_port)
 gemini_server = GeminiMCPServer()
 
 @mcp.tool()
@@ -584,15 +587,13 @@ if __name__ == "__main__":
     )
 
     if transport == "sse":
-        host = os.getenv("HOST", "0.0.0.0")
-        port = int(os.getenv("PORT", "8000"))
-        print(f"Transport: SSE  →  http://{host}:{port}/sse", file=sys.stderr)
+        print(f"Transport: SSE  →  http://{_host}:{_port}/sse", file=sys.stderr)
         print(
             "Connect Claude Code with:\n"
-            f"  claude mcp add gemini-coding -s user --transport sse http://<your-server>:{port}/sse",
+            f"  claude mcp add gemini-coding -s user --transport sse http://<your-server>:{_port}/sse",
             file=sys.stderr,
         )
-        mcp.run(transport="sse", host=host, port=port)
+        mcp.run(transport="sse")
     else:
         print("Transport: stdio (local)", file=sys.stderr)
         print("Ready to help with complex coding problems!", file=sys.stderr)
