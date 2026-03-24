@@ -1,20 +1,77 @@
 #!/usr/bin/env python3
 
 import asyncio
+import base64
 import os
 import sys
 import time
+import tempfile
 import mimetypes
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from urllib.parse import parse_qs, urlencode
 
 from google import genai
 from google.genai import types
 from mcp.server.fastmcp import FastMCP
 from mcp.types import TextContent
 import json
+
+
+# ---------------------------------------------------------------------------
+# Token-based authentication middleware (optional)
+# ---------------------------------------------------------------------------
+# Set MCP_AUTH_TOKEN to require a token for the GET /sse endpoint.
+# The token can be provided as:
+#   1. Query parameter:  /sse?token=<value>
+#   2. HTTP header:      Authorization: Bearer <value>
+#
+# POST /messages is *not* guarded because the session-id (communicated over
+# the already-authenticated SSE stream) provides implicit authentication.
+# ---------------------------------------------------------------------------
+
+class TokenAuthMiddleware:
+    """ASGI middleware that guards GET /sse with a bearer / query-param token."""
+
+    def __init__(self, app, token: str):
+        self.app = app
+        self.token = token
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and scope["method"] == "GET" and scope["path"] == "/sse":
+            # Try Authorization header first
+            headers = dict(scope.get("headers", []))
+            auth_header = headers.get(b"authorization", b"").decode()
+            token_from_header = ""
+            if auth_header.lower().startswith("bearer "):
+                token_from_header = auth_header[7:]
+
+            # Try query-string ?token=<value>
+            qs = scope.get("query_string", b"").decode()
+            params = parse_qs(qs)
+            token_from_qs = params.get("token", [""])[0]
+
+            if token_from_header == self.token or token_from_qs == self.token:
+                # Strip the token param from the query string before forwarding
+                if token_from_qs:
+                    remaining = {k: v for k, v in params.items() if k != "token"}
+                    scope = dict(scope, query_string=urlencode(remaining, doseq=True).encode())
+                await self.app(scope, receive, send)
+            else:
+                # 401 Unauthorized
+                await send({
+                    "type": "http.response.start",
+                    "status": 401,
+                    "headers": [[b"content-type", b"application/json"]],
+                })
+                await send({
+                    "type": "http.response.body",
+                    "body": b'{"error":"Unauthorized: valid token required"}',
+                })
+        else:
+            await self.app(scope, receive, send)
 
 # Configure environment
 if not os.getenv('GEMINI_API_KEY'):
@@ -119,6 +176,7 @@ class Session:
     processed_files: Dict[str, ProcessedFile] = None
     requested_files: List[str] = None  # Track files Gemini has requested
     search_queries: List[str] = None   # Track searches Gemini has requested
+    pending_files: List[str] = None    # Files uploaded but not yet sent in a message
     
     def __post_init__(self):
         if self.processed_files is None:
@@ -127,6 +185,8 @@ class Session:
             self.requested_files = []
         if self.search_queries is None:
             self.search_queries = []
+        if self.pending_files is None:
+            self.pending_files = []
 
 class GeminiMCPServer:
     """MCP Server for Gemini file attachment functionality."""
@@ -179,23 +239,11 @@ class GeminiMCPServer:
             await asyncio.sleep(self.min_time_between_requests - time_since_last)
         self.last_request_time = time.time()
     
-    async def _process_file(self, file_path: str, session: Session) -> ProcessedFile:
-        """Upload file to Gemini and return processed file info."""
-        # Check if already processed
-        if file_path in session.processed_files:
-            return session.processed_files[file_path]
-        
-        # Check if file exists
-        if not os.path.exists(file_path):
-            raise FileNotFoundError(f"File not found: {file_path}")
-        
-        # Get file info
-        file_name = os.path.basename(file_path)
-        mime_type, _ = mimetypes.guess_type(file_path)
-        
-        # Handle common file extensions that mimetypes doesn't recognize
+    def _get_mime_type(self, file_name: str) -> str:
+        """Determine MIME type from a file name."""
+        mime_type, _ = mimetypes.guess_type(file_name)
         if not mime_type:
-            ext = os.path.splitext(file_path)[1].lower()
+            ext = os.path.splitext(file_name)[1].lower()
             mime_type_map = {
                 '.jsx': 'text/javascript',
                 '.tsx': 'text/typescript',
@@ -220,37 +268,35 @@ class GeminiMCPServer:
                 '.sql': 'text/x-sql'
             }
             mime_type = mime_type_map.get(ext, 'text/plain')
-        
+        return mime_type
+    
+    async def _upload_to_gemini(self, file_path: str, file_name: str, mime_type: str, session: Session) -> ProcessedFile:
+        """Upload a file to Gemini and wait for processing. Returns ProcessedFile."""
         print(f"[{datetime.now().isoformat()}] Session {session.session_id}: Uploading file {file_name} ({mime_type})", file=sys.stderr)
         
-        # Upload to Gemini
         try:
             uploaded_file = client.files.upload(file=file_path)
             
             # Wait for processing with exponential backoff
-            wait_intervals = [0.5, 0.5, 1, 1, 2, 3, 5, 8]  # Exponential backoff pattern
+            wait_intervals = [0.5, 0.5, 1, 1, 2, 3, 5, 8]
             total_wait = 0
-            max_wait = 20  # Reduced from 30 seconds
+            max_wait = 20
             
             for interval in wait_intervals:
                 if uploaded_file.state != 'PROCESSING':
                     break
-                    
                 print(f"[{datetime.now().isoformat()}] Session {session.session_id}: File {file_name} is processing... ({total_wait:.1f}s)", file=sys.stderr)
                 await asyncio.sleep(interval)
                 total_wait += interval
                 uploaded_file = client.files.get(name=uploaded_file.name)
-                
                 if total_wait >= max_wait:
                     break
             
             if uploaded_file.state == 'PROCESSING':
                 raise Exception(f"File processing timeout after {max_wait} seconds")
-            
             if uploaded_file.state == 'FAILED':
                 raise Exception(f"File upload failed: {getattr(uploaded_file, 'error', 'Unknown error')}")
             
-            # Create processed file info
             processed_file = ProcessedFile(
                 file_type='file_data',
                 file_uri=uploaded_file.uri,
@@ -260,14 +306,62 @@ class GeminiMCPServer:
                 gemini_file_id=uploaded_file.name
             )
             
-            # Store in session
-            session.processed_files[file_path] = processed_file
-            
             print(f"[{datetime.now().isoformat()}] Session {session.session_id}: File {file_name} uploaded successfully (URI: {uploaded_file.uri})", file=sys.stderr)
             return processed_file
-            
         except Exception as e:
-            raise Exception(f"Failed to process file {file_path}: {e}")
+            raise Exception(f"Failed to upload file {file_name}: {e}")
+    
+    async def _process_file(self, file_path: str, session: Session) -> ProcessedFile:
+        """Upload a local file to Gemini and return processed file info."""
+        # Check if already processed
+        if file_path in session.processed_files:
+            return session.processed_files[file_path]
+        
+        # Check if file exists
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"File not found: {file_path}")
+        
+        file_name = os.path.basename(file_path)
+        mime_type = self._get_mime_type(file_name)
+        
+        processed_file = await self._upload_to_gemini(file_path, file_name, mime_type, session)
+        session.processed_files[file_path] = processed_file
+        return processed_file
+    
+    async def _process_file_content(self, file_name: str, content_base64: str, session: Session, mime_type: Optional[str] = None) -> ProcessedFile:
+        """Upload base64-encoded file content to Gemini. Used for remote file uploads via SSE."""
+        # Check if already processed by name
+        if file_name in session.processed_files:
+            return session.processed_files[file_name]
+        
+        if not mime_type:
+            mime_type = self._get_mime_type(file_name)
+        
+        # Decode base64 content
+        try:
+            file_bytes = base64.b64decode(content_base64)
+        except Exception as e:
+            raise ValueError(f"Invalid base64 content for file {file_name}: {e}")
+        
+        # Write to a temp file for Gemini upload
+        suffix = os.path.splitext(file_name)[1] or '.tmp'
+        # Sanitize file_name for use in temp file prefix (remove path separators and null bytes)
+        safe_name = os.path.basename(file_name).replace('\x00', '')
+        tmp_fd, tmp_path = tempfile.mkstemp(suffix=suffix, prefix=f"mcp_upload_{safe_name}_")
+        try:
+            os.write(tmp_fd, file_bytes)
+            os.close(tmp_fd)
+            
+            processed_file = await self._upload_to_gemini(tmp_path, file_name, mime_type, session)
+            session.processed_files[file_name] = processed_file
+            session.pending_files.append(file_name)
+            return processed_file
+        finally:
+            # Clean up temp file
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
     
     def _get_or_create_session(self, session_id: Optional[str] = None) -> Session:
         """Get existing session or create new one."""
@@ -336,9 +430,67 @@ class GeminiMCPServer:
                 if match not in session.search_queries:
                     session.search_queries.append(match.strip())
 
-# Create server instance
-mcp = FastMCP("gemini-coding-assistant")
+# Create server instance — pick up HOST / PORT early so the SSE transport
+# binds to the right address (FastMCP reads them from its settings object).
+_host = os.getenv("HOST", "0.0.0.0")
+_port = int(os.getenv("PORT", "8000"))
+mcp = FastMCP("gemini-coding-assistant", host=_host, port=_port)
 gemini_server = GeminiMCPServer()
+
+# Determine transport mode — upload_file is only available in SSE (remote) mode
+_transport_mode = os.getenv("MCP_TRANSPORT", "stdio").lower()
+
+async def _upload_file_impl(
+    file_name: str,
+    content: str,
+    session_id: Optional[str] = None,
+    mime_type: Optional[str] = None,
+    description: Optional[str] = None
+) -> str:
+    """Upload a file to a Gemini session by providing its content as base64.
+    
+    Use this tool when the MCP server is running remotely (SSE transport) and you
+    need to share files with Gemini that are not on the server's filesystem.
+    Upload files before calling consult_gemini so they are included in the conversation.
+    
+    Args:
+        file_name: Name of the file (e.g. "main.py", "config.json")
+        content: Base64-encoded file content
+        session_id: Optional session ID to add files to an existing session. If omitted, a new session is created.
+        mime_type: Optional MIME type override (auto-detected from file_name if not provided)
+        description: Optional description of the file's purpose
+    """
+    await gemini_server._rate_limit()
+    gemini_server._ensure_cleanup_task_started()
+    
+    try:
+        session = gemini_server._get_or_create_session(session_id)
+        
+        processed_file = await gemini_server._process_file_content(
+            file_name, content, session, mime_type
+        )
+        
+        result_parts = [
+            f"**File uploaded successfully**",
+            f"- **File:** {processed_file.file_name}",
+            f"- **Type:** {processed_file.mime_type}",
+            f"- **Session ID:** {session.session_id}",
+        ]
+        if description:
+            result_parts.append(f"- **Description:** {description}")
+        result_parts.append("")
+        result_parts.append(f"*Use session_id: \"{session.session_id}\" when calling consult_gemini to include this file.*")
+        
+        return "\n".join(result_parts)
+    
+    except Exception as e:
+        print(f"[{datetime.now().isoformat()}] Upload error: {e}", file=sys.stderr)
+        return f"Error uploading file: {e}"
+
+# Only register upload_file as an MCP tool when running in SSE (remote) mode.
+# In stdio (local) mode, clients can provide file paths directly via attached_files.
+if _transport_mode == "sse":
+    upload_file = mcp.tool(name="upload_file")(_upload_file_impl)
 
 @mcp.tool()
 async def consult_gemini(
@@ -358,8 +510,8 @@ async def consult_gemini(
         session_id: Optional session ID to continue a previous conversation
         problem_description: Detailed description of the coding problem (required for new sessions)
         code_context: All relevant code - will be cached for the session (required for new sessions)
-        attached_files: Array of file paths to upload and attach to the conversation
-        file_descriptions: Optional object mapping file paths to descriptions
+        attached_files: Array of local file paths to upload and attach to the conversation
+        file_descriptions: Optional object mapping file paths/names to descriptions
         additional_context: Additional context, updates, or what changed since last question
         preferred_approach: Type of assistance needed (solution, review, debug, optimize, explain, follow-up)
     """
@@ -373,12 +525,13 @@ async def consult_gemini(
         # Get or create session
         session = gemini_server._get_or_create_session(session_id)
         
-        # For new sessions, require problem description and either code_context or attached_files
+        # For new sessions, require problem description and either code_context, attached_files, or pre-uploaded files
         if session.message_count == 0:
+            has_pending_uploads = bool(session.pending_files)
             if not problem_description:
                 raise ValueError("problem_description is required for new sessions")
-            if not code_context and not attached_files:
-                raise ValueError("Either code_context or attached_files are required for new sessions")
+            if not code_context and not attached_files and not has_pending_uploads:
+                raise ValueError("Either code_context, attached_files, or pre-uploaded files (via upload_file) are required for new sessions")
             
             # Store initial context
             session.problem_description = problem_description
@@ -426,6 +579,19 @@ async def consult_gemini(
                 
                 print(f"[{datetime.now().isoformat()}] Session {session.session_id}: Parallel upload completed", file=sys.stderr)
             
+            # Include files previously uploaded via upload_file tool
+            if session.pending_files:
+                if not attached_files:
+                    context_parts.append("\n**Attached Files:**")
+                for file_key in session.pending_files:
+                    if file_key in session.processed_files:
+                        file_info = session.processed_files[file_key]
+                        description = file_descriptions.get(file_key, "") if file_descriptions else ""
+                        if description:
+                            description = f" - {description}"
+                        context_parts.append(f"\n- {file_info.file_name}{description}")
+                print(f"[{datetime.now().isoformat()}] Session {session.session_id}: Including {len(session.pending_files)} pre-uploaded files", file=sys.stderr)
+            
             context_parts.append("\n\nPlease help me solve this problem. I may have follow-up questions, so please maintain context throughout our conversation.")
             
             # Build message content - include text and uploaded file objects
@@ -438,6 +604,15 @@ async def consult_gemini(
                     # Get the actual uploaded file object from Gemini
                     uploaded_file = client.files.get(name=file_info.gemini_file_id)
                     message_content.append(uploaded_file)
+            
+            # Add pre-uploaded file objects (from upload_file tool)
+            for file_key in list(session.pending_files):
+                if file_key in session.processed_files:
+                    file_info = session.processed_files[file_key]
+                    uploaded_file = client.files.get(name=file_info.gemini_file_id)
+                    message_content.append(uploaded_file)
+            # Clear pending list now that files have been sent
+            session.pending_files.clear()
             
             # Send initial context
             response = await asyncio.get_event_loop().run_in_executor(
@@ -463,9 +638,22 @@ async def consult_gemini(
         # Log request
         print(f"[{datetime.now().isoformat()}] Session {session.session_id}: Question #{session.message_count + 1} ({preferred_approach})", file=sys.stderr)
         
+        # Build message content - include pending uploaded files if any
+        if session.pending_files:
+            message_content = [question_prompt]
+            for file_key in list(session.pending_files):
+                if file_key in session.processed_files:
+                    file_info = session.processed_files[file_key]
+                    uploaded_file = client.files.get(name=file_info.gemini_file_id)
+                    message_content.append(uploaded_file)
+            session.pending_files.clear()
+            print(f"[{datetime.now().isoformat()}] Session {session.session_id}: Including uploaded files in follow-up message", file=sys.stderr)
+        else:
+            message_content = question_prompt
+        
         # Send message and get response
         response = await asyncio.get_event_loop().run_in_executor(
-            None, session.chat.send_message, question_prompt
+            None, session.chat.send_message, message_content
         )
         session.message_count += 1
         
@@ -546,6 +734,7 @@ async def list_sessions() -> str:
             "message_count": session.message_count,
             "problem_summary": (session.problem_description[:100] + "...") if session.problem_description else "No description",
             "file_count": len(session.processed_files),
+            "pending_uploads": len(session.pending_files),
             "has_code_context": bool(session.code_context),
             "requests": len(session.requested_files) + len(session.search_queries)
         }
@@ -553,7 +742,7 @@ async def list_sessions() -> str:
     
     if session_list:
         session_text = "\n\n".join([
-            f"- **{s['id']}**\n  Messages: {s['message_count']}\n  Created: {s['created']}\n  Last used: {s['last_used']}\n  Files attached: {s['file_count']}\n  Code context: {'Yes' if s['has_code_context'] else 'No'}\n  Requests made: {s['requests']}\n  Problem: {s['problem_summary']}"
+            f"- **{s['id']}**\n  Messages: {s['message_count']}\n  Created: {s['created']}\n  Last used: {s['last_used']}\n  Files attached: {s['file_count']}\n  Pending uploads: {s['pending_uploads']}\n  Code context: {'Yes' if s['has_code_context'] else 'No'}\n  Requests made: {s['requests']}\n  Problem: {s['problem_summary']}"
             for s in session_list
         ])
         text = f"Active sessions:\n{session_text}"
@@ -576,24 +765,44 @@ async def end_session(session_id: str) -> str:
 if __name__ == "__main__":
     transport = os.getenv("MCP_TRANSPORT", "stdio").lower()
 
-    print("Gemini Coding Assistant MCP Server v3.1.0 running (Python)", file=sys.stderr)
-    print(
-        "Features: Session management, file attachments, context persistence, "
-        "follow-up questions, request tracking",
-        file=sys.stderr,
-    )
+    print("Gemini Coding Assistant MCP Server v3.2.0 running (Python)", file=sys.stderr)
 
     if transport == "sse":
-        host = os.getenv("HOST", "0.0.0.0")
-        port = int(os.getenv("PORT", "8000"))
-        print(f"Transport: SSE  →  http://{host}:{port}/sse", file=sys.stderr)
+        import uvicorn
+
+        auth_token = os.getenv("MCP_AUTH_TOKEN", "")
+
         print(
-            "Connect Claude Code with:\n"
-            f"  claude mcp add gemini-coding -s user --transport sse http://<your-server>:{port}/sse",
+            "Features: Session management, file attachments, file uploads, context persistence, "
+            "follow-up questions, request tracking",
             file=sys.stderr,
         )
-        mcp.run(transport="sse", host=host, port=port)
+        print(f"Transport: SSE  →  http://{_host}:{_port}/sse", file=sys.stderr)
+        if auth_token:
+            print("Auth: token required (MCP_AUTH_TOKEN is set)", file=sys.stderr)
+        else:
+            print("Auth: disabled (MCP_AUTH_TOKEN not set)", file=sys.stderr)
+        print(
+            "Connect Claude Code with:\n"
+            f"  claude mcp add gemini-coding -s user --transport sse http://<your-server>:{_port}/sse",
+            file=sys.stderr,
+        )
+
+        app = mcp.sse_app()
+
+        if auth_token:
+            app = TokenAuthMiddleware(app, auth_token)
+
+        try:
+            uvicorn.run(app, host=_host, port=_port, log_level="info")
+        except KeyboardInterrupt:
+            pass
     else:
+        print(
+            "Features: Session management, file attachments, context persistence, "
+            "follow-up questions, request tracking",
+            file=sys.stderr,
+        )
         print("Transport: stdio (local)", file=sys.stderr)
         print("Ready to help with complex coding problems!", file=sys.stderr)
         mcp.run()
