@@ -85,9 +85,10 @@ Start or continue a conversation with Gemini about complex coding problems.
 - `additional_context` (optional): Updates or changes since last question
 - `preferred_approach`: Type of help needed (solution/review/debug/optimize/explain/follow-up)
 
-### 2. `upload_file`
-Upload a file to a Gemini session by providing its content as base64. Use this when the
-MCP server is running remotely (SSE transport) and the client cannot share local file paths.
+### 2. `upload_file` *(SSE mode only)*
+Upload a file to a Gemini session by providing its content as base64. This tool is
+only available when the server is running in SSE (remote) transport mode. In stdio
+(local) mode, use the `attached_files` parameter on `consult_gemini` instead.
 
 **Parameters:**
 - `file_name`: Name of the file (e.g. `"main.py"`, `"config.json"`)

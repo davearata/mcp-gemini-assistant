@@ -379,8 +379,10 @@ class GeminiMCPServer:
 mcp = FastMCP("gemini-coding-assistant")
 gemini_server = GeminiMCPServer()
 
-@mcp.tool()
-async def upload_file(
+# Determine transport mode — upload_file is only available in SSE (remote) mode
+_transport_mode = os.getenv("MCP_TRANSPORT", "stdio").lower()
+
+async def _upload_file_impl(
     file_name: str,
     content: str,
     session_id: Optional[str] = None,
@@ -426,6 +428,11 @@ async def upload_file(
     except Exception as e:
         print(f"[{datetime.now().isoformat()}] Upload error: {e}", file=sys.stderr)
         return f"Error uploading file: {e}"
+
+# Only register upload_file as an MCP tool when running in SSE (remote) mode.
+# In stdio (local) mode, clients can provide file paths directly via attached_files.
+if _transport_mode == "sse":
+    upload_file = mcp.tool(name="upload_file")(_upload_file_impl)
 
 @mcp.tool()
 async def consult_gemini(
@@ -701,13 +708,13 @@ if __name__ == "__main__":
     transport = os.getenv("MCP_TRANSPORT", "stdio").lower()
 
     print("Gemini Coding Assistant MCP Server v3.2.0 running (Python)", file=sys.stderr)
-    print(
-        "Features: Session management, file attachments, file uploads, context persistence, "
-        "follow-up questions, request tracking",
-        file=sys.stderr,
-    )
 
     if transport == "sse":
+        print(
+            "Features: Session management, file attachments, file uploads, context persistence, "
+            "follow-up questions, request tracking",
+            file=sys.stderr,
+        )
         host = os.getenv("HOST", "0.0.0.0")
         port = int(os.getenv("PORT", "8000"))
         print(f"Transport: SSE  →  http://{host}:{port}/sse", file=sys.stderr)
@@ -718,6 +725,11 @@ if __name__ == "__main__":
         )
         mcp.run(transport="sse", host=host, port=port)
     else:
+        print(
+            "Features: Session management, file attachments, context persistence, "
+            "follow-up questions, request tracking",
+            file=sys.stderr,
+        )
         print("Transport: stdio (local)", file=sys.stderr)
         print("Ready to help with complex coding problems!", file=sys.stderr)
         mcp.run()

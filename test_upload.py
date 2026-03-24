@@ -263,3 +263,70 @@ class TestProcessFile:
 
         result = await server._process_file("/some/cached.txt", session)
         assert result is cached
+
+
+def _load_module_with_transport(transport_value):
+    """Helper: load gemini_mcp.py with a specific MCP_TRANSPORT value."""
+    env_patch = patch.dict(os.environ, {"MCP_TRANSPORT": transport_value, "GEMINI_API_KEY": "test-key"})
+    client_patch = patch('google.genai.Client', return_value=MagicMock())
+    with env_patch, client_patch:
+        spec = importlib.util.spec_from_file_location(
+            f"gemini_mcp_{transport_value}", "gemini_mcp.py"
+        )
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+    return m
+
+
+class TestUploadFileConditionalRegistration:
+    """Tests that upload_file is only available in SSE mode."""
+
+    def _get_tool_names(self, module):
+        """Return the set of tool names registered on the module's FastMCP instance."""
+        return {t.name for t in module.mcp._tool_manager.list_tools()}
+
+    def test_upload_file_registered_in_sse_mode(self):
+        """upload_file tool should be registered when MCP_TRANSPORT=sse."""
+        m = _load_module_with_transport("sse")
+        tool_names = self._get_tool_names(m)
+        assert "upload_file" in tool_names, (
+            f"upload_file should be registered in SSE mode, got: {tool_names}"
+        )
+
+    def test_upload_file_not_registered_in_stdio_mode(self):
+        """upload_file tool should NOT be registered when MCP_TRANSPORT=stdio."""
+        m = _load_module_with_transport("stdio")
+        tool_names = self._get_tool_names(m)
+        assert "upload_file" not in tool_names, (
+            f"upload_file should NOT be registered in stdio mode, got: {tool_names}"
+        )
+
+    def test_upload_file_not_registered_by_default(self):
+        """upload_file tool should NOT be registered when MCP_TRANSPORT is unset (defaults to stdio)."""
+        env_patch = patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}, clear=False)
+        # Make sure MCP_TRANSPORT is not set
+        env_copy = os.environ.copy()
+        env_copy.pop("MCP_TRANSPORT", None)
+        env_patch2 = patch.dict(os.environ, env_copy, clear=True)
+        client_patch = patch('google.genai.Client', return_value=MagicMock())
+        with env_patch2, client_patch:
+            os.environ["GEMINI_API_KEY"] = "test-key"
+            spec = importlib.util.spec_from_file_location(
+                "gemini_mcp_default", "gemini_mcp.py"
+            )
+            m = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(m)
+        tool_names = self._get_tool_names(m)
+        assert "upload_file" not in tool_names, (
+            f"upload_file should NOT be registered by default (stdio), got: {tool_names}"
+        )
+
+    def test_core_tools_always_registered(self):
+        """consult_gemini, list_sessions, end_session should be registered in both modes."""
+        for transport in ("stdio", "sse"):
+            m = _load_module_with_transport(transport)
+            tool_names = self._get_tool_names(m)
+            for expected in ("consult_gemini", "get_gemini_requests", "list_sessions", "end_session"):
+                assert expected in tool_names, (
+                    f"{expected} should be registered in {transport} mode, got: {tool_names}"
+                )
