@@ -8,6 +8,7 @@ A powerful MCP server that allows Claude Code to consult Gemini for complex codi
 
 - **Session Management**: Maintain conversation context across multiple queries
 - **File Attachments**: Read and include actual code files in conversations
+- **File Uploads**: Upload file content directly for remote/SSE deployments
 - **Hybrid Context**: Combine text-based `code_context` with file attachments
 - **Follow-up Questions**: Ask follow-up questions without resending code context
 - **Context Caching**: Code context and file content are cached per session
@@ -79,15 +80,29 @@ Start or continue a conversation with Gemini about complex coding problems.
 - `problem_description`: Description of the problem (required for new sessions)
 - `code_context`: All relevant code (required for new sessions, cached afterward)
 - `attached_files` (optional): Array of file paths to read and include in the conversation
-- `file_descriptions` (optional): Object mapping file paths to descriptions
+- `file_descriptions` (optional): Object mapping file paths/names to descriptions
 - `specific_question`: The question you want answered
 - `additional_context` (optional): Updates or changes since last question
 - `preferred_approach`: Type of help needed (solution/review/debug/optimize/explain/follow-up)
 
-### 2. `list_sessions`
+### 2. `upload_file`
+Upload a file to a Gemini session by providing its content as base64. Use this when the
+MCP server is running remotely (SSE transport) and the client cannot share local file paths.
+
+**Parameters:**
+- `file_name`: Name of the file (e.g. `"main.py"`, `"config.json"`)
+- `content`: Base64-encoded file content
+- `session_id` (optional): Add the file to an existing session, or omit to create a new one
+- `mime_type` (optional): MIME type override (auto-detected from file name if not provided)
+- `description` (optional): Description of the file's purpose
+
+### 3. `get_gemini_requests`
+Get the files and searches that Gemini has requested in a session.
+
+### 4. `list_sessions`
 List all active Gemini consultation sessions.
 
-### 3. `end_session`
+### 5. `end_session`
 End a specific session to free up memory.
 
 ## Usage Examples
@@ -126,6 +141,47 @@ End a specific session to free up memory.
 ```
 
 Response includes a session ID for follow-ups.
+
+### Remote File Uploads (SSE Mode)
+
+When the server runs remotely via SSE transport, local file paths are not accessible.
+Use `upload_file` to send file contents as base64, then reference the session in `consult_gemini`:
+
+```
+# Step 1 — upload files (base64-encoded content)
+/upload_file
+  file_name: "main.py"
+  content: "aW1wb3J0IG9zCg=="   # base64 of the file content
+  description: "Main application entry point"
+# → returns session_id: "abc123..."
+
+/upload_file
+  file_name: "utils.py"
+  content: "ZGVmIGhlbHBlcigpOg=="
+  session_id: "abc123..."
+  description: "Helper utilities"
+
+# Step 2 — consult Gemini using the same session
+/consult_gemini
+  session_id: "abc123..."
+  problem_description: "Need help optimizing this application"
+  specific_question: "How can I reduce memory usage?"
+  preferred_approach: "optimize"
+```
+
+You can also upload additional files mid-conversation:
+
+```
+/upload_file
+  file_name: "config.yaml"
+  content: "c2VydmVyOgogIHBvcnQ6IDgwODA="
+  session_id: "abc123..."
+
+/consult_gemini
+  session_id: "abc123..."
+  specific_question: "Here is the config file you asked for. Does this help explain the issue?"
+  preferred_approach: "follow-up"
+```
 
 ### Follow-up Question
 ```
@@ -193,7 +249,7 @@ MCP_TRANSPORT=sse PORT=8000 ./venv/bin/python gemini_mcp.py
 The server will print:
 
 ```
-Gemini Coding Assistant MCP Server v3.1.0 running (Python)
+Gemini Coding Assistant MCP Server v3.2.0 running (Python)
 Transport: SSE  →  http://0.0.0.0:8000/sse
 Connect Claude Code with:
   claude mcp add gemini-coding -s user --transport sse http://<your-server>:8000/sse
@@ -252,6 +308,7 @@ A `Dockerfile` is available for containerised SSE deployment. See the
 
 ## Version History
 
+- v3.2.0: Added file upload support for remote/SSE deployments
 - v3.0.0: Enhanced system prompt for Claude Code Development Kit integration
 - v2.1.0: Added file attachment system with automatic cleanup
 - v2.0.0: Added session management and follow-up support  
