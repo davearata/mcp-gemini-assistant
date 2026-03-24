@@ -345,7 +345,9 @@ class GeminiMCPServer:
         
         # Write to a temp file for Gemini upload
         suffix = os.path.splitext(file_name)[1] or '.tmp'
-        tmp_fd, tmp_path = tempfile.mkstemp(suffix=suffix, prefix=f"mcp_upload_{file_name}_")
+        # Sanitize file_name for use in temp file prefix (remove path separators and null bytes)
+        safe_name = os.path.basename(file_name).replace('\x00', '')
+        tmp_fd, tmp_path = tempfile.mkstemp(suffix=suffix, prefix=f"mcp_upload_{safe_name}_")
         try:
             os.write(tmp_fd, file_bytes)
             os.close(tmp_fd)
@@ -474,7 +476,8 @@ async def upload_file(
         ]
         if description:
             result_parts.append(f"- **Description:** {description}")
-        result_parts.append(f"\n*Use session_id: \"{session.session_id}\" when calling consult_gemini to include this file.*")
+        result_parts.append("")
+        result_parts.append(f"*Use session_id: \"{session.session_id}\" when calling consult_gemini to include this file.*")
         
         return "\n".join(result_parts)
     
